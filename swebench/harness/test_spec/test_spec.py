@@ -208,6 +208,8 @@ def make_test_spec(
     repo_directory = f"/{env_name}"
     specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
     docker_specs = specs.get("docker_specs", {})
+    if "nano_cpus" in specs:
+        docker_specs["nano_cpus"] = specs["nano_cpus"]
 
     repo_script_list = make_repo_script_list(
         specs, repo, repo_directory, base_commit, env_name

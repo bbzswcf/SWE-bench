@@ -1,0 +1,22 @@
+#!/bin/bash
+set -e
+
+PREDICTIONS_PATH="pred/preds.json"
+# PREDICTIONS_PATH="gold"
+DATASET="data/SWE-bench_Verified_test.json"
+SPLIT="test"
+MAX_WORKERS=30
+
+RUN_ID="swe_bench_verified_$(date +%Y%m%d_%H%M%S)"
+REPORT_DIR="results/${RUN_ID}"
+
+echo "Run ID: ${RUN_ID}"
+echo "Report dir: ${REPORT_DIR}"
+
+.venv/bin/python -m swebench.harness.run_evaluation \
+  -d "${DATASET}" \
+  -s "${SPLIT}" \
+  -p "${PREDICTIONS_PATH}" \
+  --max_workers "${MAX_WORKERS}" \
+  -id "${RUN_ID}" \
+  --report_dir "${REPORT_DIR}"

@@ -185,16 +185,6 @@ def run_instance(
                 logger,
             )
 
-        # Get git diff before running eval script
-        git_diff_output_before = (
-            container.exec_run(
-                "git -c core.fileMode=false diff", workdir=DOCKER_WORKDIR
-            )
-            .output.decode(UTF8)
-            .strip()
-        )
-        logger.info(f"Git diff before:\n{git_diff_output_before}")
-
         eval_file = Path(log_dir / "eval.sh")
         eval_file.write_text(test_spec.eval_script)
         logger.info(
@@ -218,20 +208,6 @@ def run_instance(
                     f"Test timed out after {timeout} seconds.",
                     logger,
                 )
-
-        # Get git diff after running eval script (ignore permission changes)
-        git_diff_output_after = (
-            container.exec_run(
-                "git -c core.fileMode=false diff", workdir=DOCKER_WORKDIR
-            )
-            .output.decode(UTF8)
-            .strip()
-        )
-
-        # Check if git diff changed after running eval script
-        logger.info(f"Git diff after:\n{git_diff_output_after}")
-        if git_diff_output_after != git_diff_output_before:
-            logger.info("Git diff changed after running eval script")
 
         # Get report from test output
         logger.info(f"Grading answer for {instance_id}...")
@@ -379,14 +355,16 @@ def get_dataset_from_preds(
     run_id: str,
     rewrite_reports: bool,
     exclude_completed: bool = True,
+    preloaded_dataset: list | None = None,
 ):
     """
     Return only instances that have predictions and are in the dataset.
     If instance_ids is provided, only return instances with those IDs.
     If exclude_completed is True, only return instances that have not been run yet.
+    If preloaded_dataset is provided, skip loading the dataset from disk/HuggingFace.
     """
     # load dataset
-    dataset = load_swebench_dataset(dataset_name, split)
+    dataset = preloaded_dataset if preloaded_dataset is not None else load_swebench_dataset(dataset_name, split)
     dataset_ids = {i[KEY_INSTANCE_ID] for i in dataset}
 
     if instance_ids:
@@ -514,11 +492,18 @@ def main(
     predictions = get_predictions_from_file(predictions_path, dataset_name, split)
     predictions = {pred[KEY_INSTANCE_ID]: pred for pred in predictions}
 
-    # get dataset from predictions
+    # load dataset once (full, no instance_id filter) and reuse to avoid duplicate I/O
+    _all_instances = load_swebench_dataset(dataset_name, split)
     dataset = get_dataset_from_preds(
-        dataset_name, split, instance_ids, predictions, run_id, rewrite_reports
+        dataset_name, split, instance_ids, predictions, run_id, rewrite_reports,
+        preloaded_dataset=_all_instances,
     )
-    full_dataset = load_swebench_dataset(dataset_name, split, instance_ids)
+    # derive full_dataset for reporting (filtered by instance_ids if provided)
+    if instance_ids:
+        _instance_id_set = set(instance_ids)
+        full_dataset = [i for i in _all_instances if i[KEY_INSTANCE_ID] in _instance_id_set]
+    else:
+        full_dataset = _all_instances
 
     if modal:
         # run instances on Modal

@@ -512,6 +512,7 @@ def build_container(
         # Define arguments for running the container
         run_args = test_spec.docker_specs.get("run_args", {})
         cap_add = run_args.get("cap_add", [])
+        nano_cpus = test_spec.docker_specs.get("nano_cpus")
 
         container = client.containers.create(
             image=test_spec.instance_image_key,
@@ -521,6 +522,7 @@ def build_container(
             command="tail -f /dev/null",
             platform=test_spec.platform,
             cap_add=cap_add,
+            **({"nano_cpus": nano_cpus} if nano_cpus else {}),
         )
         logger.info(f"Container for {test_spec.instance_id} created: {container.id}")
         return container

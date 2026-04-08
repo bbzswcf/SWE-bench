@@ -432,11 +432,25 @@ def make_eval_script_list_py(
             *get_test_directives(instance),
         ]
     )
+    INSTANCES_UNSET_PROXY = {
+        "psf__requests-1724",
+        "psf__requests-1766",
+        "psf__requests-1921",
+        "psf__requests-2317",
+        "psf__requests-2931",
+        "psf__requests-5414",
+        "psf__requests-6028",
+        "django__django-16502",
+    }
     eval_commands = [
         "source /opt/miniconda3/bin/activate",
         f"conda activate {env_name}",
         f"cd {repo_directory}",
     ]
+    if instance["instance_id"] in INSTANCES_UNSET_PROXY:
+        eval_commands += [
+            "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY",
+        ]
     if "eval_commands" in specs:
         eval_commands += specs["eval_commands"]
     eval_commands += [
