@@ -3,10 +3,76 @@ from __future__ import annotations
 import docker
 import docker.errors
 import logging
+import os
 import sys
 import traceback
 
 from pathlib import Path
+
+
+# Hardcoded list of instance_ids that need HTTP(S)_PROXY/JAVA_TOOL_OPTIONS injected
+# into their evaluation containers. Keep in sync with the same constant in
+# mini-swe-agent/src/minisweagent/run/benchmarks/swebench.py.
+#
+# multilingual: ./gradlew test 触发 gradle-wrapper.jar / gradle dist 下载，
+# 容器无外网时会 Connection timed out。host 配了代理，注入即可解。
+_PROXY_REQUIRED_INSTANCE_IDS: frozenset[str] = frozenset({
+    "apache__lucene-11760",
+    "apache__lucene-12022",
+    "apache__lucene-12196",
+    "apache__lucene-12212",
+    "apache__lucene-12626",
+    "apache__lucene-13170",
+    "apache__lucene-13301",
+    "apache__lucene-13494",
+    "apache__lucene-13704",
+    "reactivex__rxjava-7597",
+})
+
+
+def _build_proxy_env(instance_id: str | None = None) -> dict:
+    """Collect HTTP(S)_PROXY / NO_PROXY from current shell, plus JAVA_TOOL_OPTIONS for JVM tools.
+
+    Only injects proxy env if `instance_id` is in ``_PROXY_REQUIRED_INSTANCE_IDS``.
+
+    Read both lower- and upper-case variants. Returns {} if no proxy is set or
+    the instance is not whitelisted.
+    """
+    if instance_id is None or instance_id not in _PROXY_REQUIRED_INSTANCE_IDS:
+        return {}
+    keys = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
+    env = {k: os.environ[k] for k in keys if os.environ.get(k)}
+    if not env:
+        return {}
+    http = env.get("HTTP_PROXY") or env.get("http_proxy", "")
+    https = env.get("HTTPS_PROXY") or env.get("https_proxy", http)
+    no = env.get("NO_PROXY") or env.get("no_proxy", "")
+
+    def _hostport(url: str) -> tuple[str, str]:
+        from urllib.parse import urlparse
+        u = urlparse(url) if "://" in url else urlparse("http://" + url)
+        return (u.hostname or "", str(u.port or ("443" if u.scheme == "https" else "80")))
+
+    if https or http:
+        sh, sp = _hostport(https or http)
+        nph, nhp = _hostport(http or https)
+        # JVM nonProxyHosts uses `|` separator. Avoid entries containing `:` (IPv6)
+        # because the gradlew script's `eval` mishandles them.
+        parts = []
+        for p in no.split(","):
+            p = p.strip()
+            if not p or ":" in p:
+                continue
+            parts.append(p.lstrip(".") if not p.startswith("*") else p)
+        non_proxy = "|".join(parts) or "localhost"
+        # Use only JAVA_TOOL_OPTIONS (auto-picked by JVM, no shell eval).
+        # Do NOT set GRADLE_OPTS — gradlew uses `eval` and `|` breaks it.
+        env["JAVA_TOOL_OPTIONS"] = (
+            f"-Dhttp.proxyHost={nph} -Dhttp.proxyPort={nhp} "
+            f"-Dhttps.proxyHost={sh} -Dhttps.proxyPort={sp} "
+            f"-Dhttp.nonProxyHosts={non_proxy}"
+        )
+    return env
 
 from swebench.harness.constants import (
     BASE_IMAGE_BUILD_DIR,
@@ -492,17 +558,18 @@ def build_container(
     if not test_spec.is_remote_image:
         build_instance_image(test_spec, client, logger, nocache)
     else:
+        # NOTE: 这里原本在镜像缺失时会自动 `client.images.pull(...)`。
+        # 我们假设所有 remote image 都已预拉取到本地，删除在线 pull 兜底以便快速失败。
+        # 如确实缺镜像，会在 `client.containers.create(...)` 阶段直接抛 ImageNotFound。
         try:
             client.images.get(test_spec.instance_image_key)
-        except docker.errors.ImageNotFound:
-            try:
-                client.images.pull(test_spec.instance_image_key)
-            except docker.errors.NotFound as e:
-                raise BuildImageError(test_spec.instance_id, str(e), logger) from e
-            except Exception as e:
-                raise Exception(
-                    f"Error occurred while pulling image {test_spec.base_image_key}: {str(e)}"
-                )
+        except docker.errors.ImageNotFound as e:
+            raise BuildImageError(
+                test_spec.instance_id,
+                f"Instance image {test_spec.instance_image_key} not found locally; "
+                "please pre-pull all required images before evaluation.",
+                logger,
+            ) from e
 
     container = None
     try:
@@ -514,6 +581,10 @@ def build_container(
         cap_add = run_args.get("cap_add", [])
         nano_cpus = test_spec.docker_specs.get("nano_cpus")
 
+        proxy_env = _build_proxy_env(test_spec.instance_id)
+        if proxy_env:
+            logger.info(f"Injecting proxy env to container ({test_spec.instance_id}): {sorted(proxy_env.keys())}")
+
         container = client.containers.create(
             image=test_spec.instance_image_key,
             name=test_spec.get_instance_container_name(run_id),
@@ -522,6 +593,7 @@ def build_container(
             command="tail -f /dev/null",
             platform=test_spec.platform,
             cap_add=cap_add,
+            environment=proxy_env or None,
             **({"nano_cpus": nano_cpus} if nano_cpus else {}),
         )
         logger.info(f"Container for {test_spec.instance_id} created: {container.id}")

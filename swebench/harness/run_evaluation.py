@@ -77,6 +77,7 @@ def run_instance(
     run_id: str,
     timeout: int | None = None,
     rewrite_reports: bool = False,
+    log_base_dir: Path | None = None,
 ) -> dict:
     """
     Run a single instance with the given prediction.
@@ -90,11 +91,14 @@ def run_instance(
         run_id (str): Run ID
         timeout (int): Timeout for running tests
         rewrite_reports (bool): True if eval run is just to reformat existing report
+        log_base_dir (Path): Base directory for per-instance logs; defaults to RUN_EVALUATION_LOG_DIR
     """
     # Set up logging directory
+    if log_base_dir is None:
+        log_base_dir = RUN_EVALUATION_LOG_DIR
     instance_id = test_spec.instance_id
     model_name_or_path = pred.get(KEY_MODEL, "None").replace("/", "__")
-    log_dir = RUN_EVALUATION_LOG_DIR / run_id / model_name_or_path / instance_id
+    log_dir = log_base_dir / run_id / model_name_or_path / instance_id
 
     # Set up report file
     report_path = log_dir / LOG_REPORT
@@ -262,6 +266,7 @@ def run_instances(
     instance_image_tag: str = "latest",
     env_image_tag: str = "latest",
     rewrite_reports: bool = False,
+    log_base_dir: Path | None = None,
 ):
     """
     Run all instances for the given predictions in parallel.
@@ -289,17 +294,16 @@ def run_instances(
         )
     )
 
-    # print number of existing instance images
+    # NOTE: 跳过 `client.images.list(all=True)` 的本地镜像枚举。
+    # 在本地存在大量镜像（>1k）且 docker 同时承担其他负载时，
+    # 这一步会在 `inspect_image` 上耗费非常长的时间（实测 >5min）。
+    # 这里假设所有需要的实例镜像已经预先 pull 到本地，
+    # 因此把它们全部视作 "existed_before"，从而 `should_remove` 不会清理它们。
     instance_image_ids = {x.instance_image_key for x in test_specs}
-    existing_images = {
-        tag
-        for i in client.images.list(all=True)
-        for tag in i.tags
-        if tag in instance_image_ids
-    }
+    existing_images = set(instance_image_ids)
     if not force_rebuild and len(existing_images):
         print(
-            f"Found {len(existing_images)} existing instance images. Will reuse them."
+            f"Assuming {len(existing_images)} instance images already exist locally (skipped slow image scan)."
         )
 
     # run instances in parallel
@@ -320,6 +324,7 @@ def run_instances(
                 run_id,
                 timeout,
                 rewrite_reports,
+                log_base_dir,
             )
         )
 
@@ -356,6 +361,7 @@ def get_dataset_from_preds(
     rewrite_reports: bool,
     exclude_completed: bool = True,
     preloaded_dataset: list | None = None,
+    log_base_dir: Path | None = None,
 ):
     """
     Return only instances that have predictions and are in the dataset.
@@ -363,6 +369,8 @@ def get_dataset_from_preds(
     If exclude_completed is True, only return instances that have not been run yet.
     If preloaded_dataset is provided, skip loading the dataset from disk/HuggingFace.
     """
+    if log_base_dir is None:
+        log_base_dir = RUN_EVALUATION_LOG_DIR
     # load dataset
     dataset = preloaded_dataset if preloaded_dataset is not None else load_swebench_dataset(dataset_name, split)
     dataset_ids = {i[KEY_INSTANCE_ID] for i in dataset}
@@ -395,7 +403,7 @@ def get_dataset_from_preds(
                 continue
             prediction = predictions[instance[KEY_INSTANCE_ID]]
             test_output_file = (
-                RUN_EVALUATION_LOG_DIR
+                log_base_dir
                 / run_id
                 / prediction["model_name_or_path"].replace("/", "__")
                 / prediction[KEY_INSTANCE_ID]
@@ -419,7 +427,7 @@ def get_dataset_from_preds(
             continue
         prediction = predictions[instance[KEY_INSTANCE_ID]]
         report_file = (
-            RUN_EVALUATION_LOG_DIR
+            log_base_dir
             / run_id
             / prediction[KEY_MODEL].replace("/", "__")
             / prediction[KEY_INSTANCE_ID]
@@ -484,6 +492,9 @@ def main(
         report_dir = Path(report_dir)
         if not report_dir.exists():
             report_dir.mkdir(parents=True)
+        log_base_dir = report_dir
+    else:
+        log_base_dir = RUN_EVALUATION_LOG_DIR
 
     if force_rebuild and namespace is not None:
         raise ValueError("Cannot force rebuild and use a namespace at the same time.")
@@ -497,6 +508,7 @@ def main(
     dataset = get_dataset_from_preds(
         dataset_name, split, instance_ids, predictions, run_id, rewrite_reports,
         preloaded_dataset=_all_instances,
+        log_base_dir=log_base_dir,
     )
     # derive full_dataset for reporting (filtered by instance_ids if provided)
     if instance_ids:
@@ -519,7 +531,9 @@ def main(
         resource.setrlimit(resource.RLIMIT_NOFILE, (open_file_limit, open_file_limit))
     client = docker.from_env()
 
-    existing_images = list_images(client)
+    # NOTE: 跳过启动时的全量本地镜像枚举（与 run_instances 中同样的原因）。
+    # 由于稍后的清理步骤也已被跳过，这里直接置空即可。
+    existing_images = set()
     if not dataset:
         print("No instances to run.")
     else:
@@ -547,10 +561,14 @@ def main(
             instance_image_tag=instance_image_tag,
             env_image_tag=env_image_tag,
             rewrite_reports=rewrite_reports,
+            log_base_dir=log_base_dir,
         )
 
-    # clean images + make final report
-    clean_images(client, existing_images, cache_level, clean)
+    # NOTE: 跳过结束时的全量镜像清理。
+    # `clean_images` 会再次 `client.images.list(all=True)` 并对每个镜像调用
+    # `should_remove`，本地镜像很多时同样非常慢；并且我们希望保留所有预拉取的
+    # 实例镜像。如确需清理，请手动执行 `docker image prune` 或 `docker rmi`。
+    # clean_images(client, existing_images, cache_level, clean)
     return make_run_report(
         predictions,
         full_dataset,
@@ -559,6 +577,8 @@ def main(
         namespace,
         instance_image_tag,
         env_image_tag,
+        report_dir=report_dir,
+        log_base_dir=log_base_dir,
     )
 
 

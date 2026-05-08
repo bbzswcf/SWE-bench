@@ -10,8 +10,6 @@ from swebench.harness.constants import (
     RUN_EVALUATION_LOG_DIR,
     LOG_REPORT,
 )
-from swebench.harness.docker_utils import list_images
-from swebench.harness.test_spec.test_spec import make_test_spec
 
 
 def make_run_report(
@@ -22,6 +20,8 @@ def make_run_report(
     namespace: str = None,
     instance_image_tag: str = "latest",
     env_image_tag: str = "latest",
+    report_dir: Optional[Path] = None,
+    log_base_dir: Optional[Path] = None,
 ) -> Path:
     """
     Make a final evaluation and run report of the instances that have been run.
@@ -36,6 +36,8 @@ def make_run_report(
     Returns:
         Path to report file
     """
+    if log_base_dir is None:
+        log_base_dir = RUN_EVALUATION_LOG_DIR
     # instantiate sets to store IDs of different outcomes
     completed_ids = set()
     resolved_ids = set()
@@ -59,7 +61,7 @@ def make_run_report(
             empty_patch_ids.add(instance_id)
             continue
         report_file = (
-            RUN_EVALUATION_LOG_DIR
+            log_base_dir
             / run_id
             / prediction[KEY_MODEL].replace("/", "__")
             / prediction[KEY_INSTANCE_ID]
@@ -87,24 +89,14 @@ def make_run_report(
             error_ids.add(instance_id)
 
     if client:
-        # get remaining images and containers
-        images = list_images(client)
-        test_specs = list(
-            map(
-                lambda x: make_test_spec(
-                    x,
-                    namespace=namespace,
-                    instance_image_tag=instance_image_tag,
-                    env_image_tag=env_image_tag,
-                ),
-                full_dataset,
-            )
-        )
-        for spec in test_specs:
-            image_name = spec.instance_image_key
-            if image_name in images:
-                unremoved_images.add(image_name)
-        containers = client.containers.list(all=True)
+        # NOTE: 跳过对本地镜像的全量枚举，`unremoved_images` 仅做信息展示，置空即可。
+        # 完整原因参见 run_evaluation.py 中的同名 NOTE。
+        # NOTE: 容器查询改用 docker filters 在守护进程端按名字子串过滤，
+        # 避免在系统上有大量历史容器时 `containers.list(all=True)` 全量列举。
+        try:
+            containers = client.containers.list(all=True, filters={"name": run_id})
+        except Exception:
+            containers = []
         for container in containers:
             if run_id in container.name:
                 unstopped_containers.add(container.name)
@@ -149,10 +141,13 @@ def make_run_report(
                 "unremoved_images": list(sorted(unremoved_images)),
             }
         )
-    report_file = Path(
+    report_filename = (
         list(predictions.values())[0][KEY_MODEL].replace("/", "__")
         + f".{run_id}"
         + ".json"
+    )
+    report_file = (
+        Path(report_dir) / report_filename if report_dir is not None else Path(report_filename)
     )
     with open(report_file, "w") as f:
         print(json.dumps(report, indent=4), file=f)

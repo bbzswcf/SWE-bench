@@ -3,7 +3,6 @@ from __future__ import annotations
 import docker
 import docker.errors
 import os
-import signal
 import tarfile
 import threading
 import time
@@ -128,35 +127,22 @@ def cleanup_container(client, container, logger):
         log_info = logger.info
         raise_error = False
 
-    # Attempt to stop the container
+    # NOTE: 跳过 `container.stop(timeout=15)` 的优雅停止流程。
+    # 容器内只跑一次性的 eval 脚本，结束后只剩 `tail -f /dev/null`，没有需要保存的状态；
+    # 偶尔残留进程不响应 SIGTERM 时 stop 会等满 15s。直接 SIGKILL 节省每实例最多 15s。
     try:
         if container:
-            log_info(f"Attempting to stop container {container.name}...")
-            container.stop(timeout=15)
+            log_info(f"Killing container {container.name}...")
+            container.kill()
+    except docker.errors.APIError as e:
+        # 容器可能已经退出了，忽略 "container not running" 类错误。
+        log_info(f"container.kill() ignored: {e}")
     except Exception as e:
+        if raise_error:
+            raise e
         log_error(
-            f"Failed to stop container {container.name}: {e}. Trying to forcefully kill..."
+            f"Failed to kill container {container.name}: {e}\n{traceback.format_exc()}"
         )
-        try:
-            # Get the PID of the container
-            container_info = client.api.inspect_container(container_id)
-            pid = container_info["State"].get("Pid", 0)
-
-            # If container PID found, forcefully kill the container
-            if pid > 0:
-                log_info(
-                    f"Forcefully killing container {container.name} with PID {pid}..."
-                )
-                os.kill(pid, signal.SIGKILL)
-            else:
-                log_error(f"PID for container {container.name}: {pid} - not killing.")
-        except Exception as e2:
-            if raise_error:
-                raise e2
-            log_error(
-                f"Failed to forcefully kill container {container.name}: {e2}\n"
-                f"{traceback.format_exc()}"
-            )
 
     # Attempt to remove the container
     try:
