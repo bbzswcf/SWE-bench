@@ -282,7 +282,13 @@ def parse_log_karma(log: str, test_spec: TestSpec) -> dict[str, str]:
                     current_suite.append(name)
                 elif new_indent < current_indent:
                     current_indent = new_indent
-                    current_suite.pop()
+                    # Karma occasionally emits a less-indented header (e.g.
+                    # second browser block, summary banner that slipped past
+                    # the SUMMARY: guard) before any suite has been pushed.
+                    # Pop only when there is something to pop so we don't
+                    # crash the entire grading pipeline.
+                    if current_suite:
+                        current_suite.pop()
                     continue
 
             if status in ("✔", "✖"):

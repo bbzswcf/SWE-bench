@@ -200,7 +200,11 @@ def exec_run_with_timeout(container, cmd, timeout: int | None = 60):
             container.exec_run(f"kill -TERM {exec_pid}", detach=True)
         timed_out = True
     end_time = time.time()
-    return exec_result.decode(), timed_out, end_time - start_time
+    # ``errors="replace"`` keeps a single binary byte (e.g. tcl test logs that
+    # mix stderr / utf-8 with raw bytes from a redis command's stdout) from
+    # killing the entire run with ``UnicodeDecodeError``.  The replacement
+    # character is acceptable: harness only greps the text for test markers.
+    return exec_result.decode(errors="replace"), timed_out, end_time - start_time
 
 
 def find_dependent_images(client: docker.DockerClient, image_name: str):

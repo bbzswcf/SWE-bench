@@ -6,6 +6,8 @@ import platform
 import threading
 import traceback
 
+from datetime import datetime
+
 if platform.system() == "Linux":
     import resource
 
@@ -457,6 +459,16 @@ def get_dataset_from_preds(
     return dataset
 
 
+def get_default_run_id(dataset_name: str) -> str:
+    dataset_stem = Path(dataset_name).stem or "dataset"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{dataset_stem}_{timestamp}"
+
+
+def get_default_report_dir(predictions_path: str) -> Path:
+    return Path(predictions_path).parent / "1eval_results"
+
+
 def main(
     dataset_name: str,
     split: str,
@@ -467,14 +479,14 @@ def main(
     cache_level: str,
     clean: bool,
     open_file_limit: int,
-    run_id: str,
+    run_id: str | None,
     timeout: int,
     namespace: str | None,
     rewrite_reports: bool,
     modal: bool,
     instance_image_tag: str = "latest",
     env_image_tag: str = "latest",
-    report_dir: str = ".",
+    report_dir: str | None = None,
 ):
     """
     Run evaluation harness for the given dataset and predictions.
@@ -486,15 +498,17 @@ def main(
         )
         return
 
+    if not run_id:
+        run_id = get_default_run_id(dataset_name)
+    if report_dir is None:
+        report_dir = get_default_report_dir(predictions_path)
+
     # set open file limit
     assert len(run_id) > 0, "Run ID must be provided"
-    if report_dir is not None:
-        report_dir = Path(report_dir)
-        if not report_dir.exists():
-            report_dir.mkdir(parents=True)
-        log_base_dir = report_dir
-    else:
-        log_base_dir = RUN_EVALUATION_LOG_DIR
+    report_dir = Path(report_dir)
+    if not report_dir.exists():
+        report_dir.mkdir(parents=True)
+    log_base_dir = report_dir
 
     if force_rebuild and namespace is not None:
         raise ValueError("Cannot force rebuild and use a namespace at the same time.")
@@ -650,7 +664,11 @@ if __name__ == "__main__":
         "--clean", type=str2bool, default=False, help="Clean images above cache level"
     )
     parser.add_argument(
-        "-id", "--run_id", type=str, required=True, help="Run ID - identifies the run"
+        "-id",
+        "--run_id",
+        type=str,
+        default=None,
+        help="Run ID - identifies the run (default: dataset name plus timestamp)",
     )
     parser.add_argument(
         "-n",
@@ -672,7 +690,10 @@ if __name__ == "__main__":
         help="Doesn't run new instances, only writes reports for instances with existing test outputs",
     )
     parser.add_argument(
-        "--report_dir", type=str, default=".", help="Directory to write reports to"
+        "--report_dir",
+        type=str,
+        default=None,
+        help="Directory to write reports to (default: dirname(predictions_path)/1eval_results)",
     )
 
     # Modal execution args
